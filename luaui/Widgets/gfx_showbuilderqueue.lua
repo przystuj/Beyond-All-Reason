@@ -128,17 +128,17 @@ function widget:Initialize()
 	end
 
 	-- Register event callbacks
-	table.insert(builderQueueApiCallbacks, builderQueueAPI.OnBuildCommandAdded(onBuildCommandAdded))
-	table.insert(builderQueueApiCallbacks, builderQueueAPI.OnBuildCommandRemoved(onBuildCommandRemoved))
-	table.insert(builderQueueApiCallbacks, builderQueueAPI.OnUnitCreated(onUnitCreated))
-	table.insert(builderQueueApiCallbacks, builderQueueAPI.OnUnitFinished(onUnitFinished))
+	table.insert(builderQueueApiCallbacks, builderQueueAPI.onBuildCommandAdded(onBuildCommandAdded))
+	table.insert(builderQueueApiCallbacks, builderQueueAPI.onBuildCommandRemoved(onBuildCommandRemoved))
+	table.insert(builderQueueApiCallbacks, builderQueueAPI.onUnitCreated(onUnitCreated))
+	table.insert(builderQueueApiCallbacks, builderQueueAPI.onUnitFinished(onUnitFinished))
 
 	unitShapes = {}
 	removedUnitShapes = {}
 	numUnitShapes = 0
 
 	-- Initialize shapes for existing build commands
-	builderQueueAPI.ForEachActiveBuildCommand(function(commandId, commandData)
+	builderQueueAPI.forEachActiveBuildCommand(function(commandId, commandData)
 		onBuildCommandAdded(commandId, commandData)
 	end)
 end
@@ -150,7 +150,7 @@ function widget:Shutdown()
 		end
 	end
 	for _, callbackData in ipairs(builderQueueApiCallbacks) do
-		builderQueueAPI.UnregisterCallback(callbackData.eventName, callbackData.callback)
+		builderQueueAPI.unregisterCallback(callbackData.eventName, callbackData.callback)
 	end
 end
 
@@ -165,6 +165,12 @@ end
 local prevGuiHidden = Spring.IsGUIHidden()
 
 function widget:Update()
+	if not WG.BuilderQueueApi then
+		error("API Builder Queue is disabled")
+		widget:Shutdown()
+		return
+	end
+
 	if not Spring.IsGUIHidden() then
 		if reInitialize then
 			reInitialize = nil

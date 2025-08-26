@@ -37,13 +37,19 @@ local MAX_QUEUE_DEPTH = 2000
 -- State Management
 --------------------------------------------------------------------------------
 
----@type table<string, BuildCommandEntry>
+--- Table for all unique build commands.
+--- @type table<string, BuildCommandEntry>
 local buildCommands = {}
-local unitBuildCommands = {}
+
+--- An ordered index of command IDs for each builder's queue.
+--- @type table<number, string[]>
+local builderCommandQueues = {}
+
 local commandIdToCreatedUnitIdMap = {}
 local createdUnitIdToCommandIdMap = {}
 local unitsAwaitingCommandProcessing = {}
 local buildersList = {}
+local builderBuildOptions = {}
 
 -- Event system for notifying consumers
 local Event = {
@@ -118,9 +124,16 @@ end
 --------------------------------------------------------------------------------
 -- Core Functions
 --------------------------------------------------------------------------------
----
+
 local function generateId(unitDefId, positionX, positionZ)
 	return string.format('%s_%s_%s', unitDefId, positionX, positionZ)
+end
+
+local function generateIdFromUnitCommand(cmd)
+	local unitDefId = math.abs(cmd.id)
+	local positionX = floor(cmd.params[1])
+	local positionZ = floor(cmd.params[3])
+	return generateId(unitDefId, positionX, positionZ), unitDefId, positionX, positionZ
 end
 
 local function removeBuilderFromCommand(commandId, unitId)
@@ -137,14 +150,14 @@ local function removeBuilderFromCommand(commandId, unitId)
 end
 
 local function clearBuilderCommands(unitId)
-	if not unitBuildCommands[unitId] then
+	if not builderCommandQueues[unitId] then
 		return
 	end
 
-	for commandId, _ in pairs(unitBuildCommands[unitId]) do
+	for _, commandId in ipairs(builderCommandQueues[unitId]) do
 		removeBuilderFromCommand(commandId, unitId)
 	end
-	unitBuildCommands[unitId] = nil
+	builderCommandQueues[unitId] = nil
 end
 
 local function checkBuilder(unitId)
@@ -154,19 +167,18 @@ local function checkBuilder(unitId)
 		return
 	end
 
-	local currentCommands = {}
 	local queue = spGetUnitCommands(unitId, math.min(queueDepth, MAX_QUEUE_DEPTH))
+	local newCommandQueue = {}
+	local newCommandMap = {}
 
-	-- Step 1: Process the current queue and identify active commands
+	-- Step 1: Process the current queue
 	for i = 1, #queue do
 		local queueCommand = queue[i]
 		if queueCommand.id < 0 then
-			local unitDefId = math.abs(queueCommand.id)
-			local positionX = floor(queueCommand.params[1])
-			local positionZ = floor(queueCommand.params[3])
-			local commandId = generateId(unitDefId, positionX, positionZ)
+			local commandId, unitDefId, positionX, positionZ = generateIdFromUnitCommand(queueCommand)
 
-			currentCommands[commandId] = true
+			table.insert(newCommandQueue, commandId)
+			newCommandMap[commandId] = true
 
 			if commandIdToCreatedUnitIdMap[commandId] == nil then
 				local isNewCommand = false
@@ -180,6 +192,7 @@ local function checkBuilder(unitId)
 					buildCommand.positionZ = positionZ
 					buildCommand.rotation = floor(queueCommand.params[4])
 					buildCommand.builderIds = {}
+					buildCommand.rawCommand = queueCommand
 					buildCommands[commandId] = buildCommand
 					isNewCommand = true
 				end
@@ -196,16 +209,17 @@ local function checkBuilder(unitId)
 		end
 	end
 
-	-- Step 2: Compare old commands with current commands to find what was removed
-	if unitBuildCommands[unitId] then
-		for oldCommandId, _ in pairs(unitBuildCommands[unitId]) do
-			if not currentCommands[oldCommandId] then
+	-- Step 2: Compare old queue with new queue to find what was removed
+	local oldCommandQueue = builderCommandQueues[unitId]
+	if oldCommandQueue then
+		for _, oldCommandId in ipairs(oldCommandQueue) do
+			if not newCommandMap[oldCommandId] then
 				removeBuilderFromCommand(oldCommandId, unitId)
 			end
 		end
 	end
 
-	unitBuildCommands[unitId] = currentCommands
+	builderCommandQueues[unitId] = newCommandQueue
 end
 
 local function clearUnit(unitId)
@@ -232,7 +246,7 @@ end
 
 local function periodicBuilderCheck()
 	periodicCheckCounter = periodicCheckCounter + 1
-	for unitId, _ in pairs(unitBuildCommands) do
+	for unitId, _ in pairs(builderCommandQueues) do
 		--- Load balancer which ensures that at most 30 units are checked per frame
 		if (unitId + periodicCheckCounter) % 30 == 1 and not unitsAwaitingCommandProcessing[unitId] then
 			checkBuilder(unitId)
@@ -240,12 +254,25 @@ local function periodicBuilderCheck()
 	end
 end
 
+local function cacheBuildOptions()
+	for udefId, udef in ipairs(UnitDefs) do
+		if udef.isBuilder and not udef.isFactory and udef.buildOptions and udef.buildOptions[1] then
+			local buildSet = {}
+			for i = 1, #udef.buildOptions do
+				buildSet[udef.buildOptions[i]] = true
+			end
+			builderBuildOptions[udefId] = buildSet
+		end
+	end
+end
+
 local function resetStateAndReinitialize()
 	buildCommands = {}
-	unitBuildCommands = {}
+	builderCommandQueues = {}
 	commandIdToCreatedUnitIdMap = {}
 	createdUnitIdToCommandIdMap = {}
 	unitsAwaitingCommandProcessing = {}
+	cacheBuildOptions()
 
 	-- Re-scan all units
 	local allUnits = spGetAllUnits()
@@ -265,20 +292,133 @@ end
 local BuilderQueueApi = {}
 
 ---@param callback fun(commandId: string, data: BuildCommandEntry)
-function BuilderQueueApi.ForEachActiveBuildCommand(callback)
+function BuilderQueueApi.forEachActiveBuildCommand(callback, teamId)
 	for commandId, commandEntry in pairs(buildCommands) do
-		if commandEntry.builderCount > 0 then
+		if commandEntry.builderCount > 0 and (teamId == nil or commandEntry.teamId == teamId) then
 			callback(commandId, commandEntry)
 		end
 	end
 end
 
-BuilderQueueApi.OnBuildCommandAdded = function(callback) return registerCallback(Event.onBuildCommandAdded, callback) end
-BuilderQueueApi.OnBuildCommandRemoved = function(callback) return registerCallback(Event.onBuildCommandRemoved, callback) end
-BuilderQueueApi.OnUnitCreated = function(callback) return registerCallback(Event.onUnitCreated, callback) end
-BuilderQueueApi.OnUnitFinished = function(callback) return registerCallback(Event.onUnitFinished, callback) end
-BuilderQueueApi.OnBuilderDestroyed = function(callback) return registerCallback(Event.onBuilderDestroyed, callback) end
-BuilderQueueApi.UnregisterCallback = unregisterCallback
+BuilderQueueApi.onBuildCommandAdded = function(callback) return registerCallback(Event.onBuildCommandAdded, callback) end
+BuilderQueueApi.onBuildCommandRemoved = function(callback) return registerCallback(Event.onBuildCommandRemoved, callback) end
+BuilderQueueApi.onUnitCreated = function(callback) return registerCallback(Event.onUnitCreated, callback) end
+BuilderQueueApi.onUnitFinished = function(callback) return registerCallback(Event.onUnitFinished, callback) end
+BuilderQueueApi.onBuilderDestroyed = function(callback) return registerCallback(Event.onBuilderDestroyed, callback) end
+BuilderQueueApi.unregisterCallback = unregisterCallback
+
+---@param unitDefId number
+---@return boolean
+function BuilderQueueApi.isBuilder(unitDefId)
+	return buildersList[unitDefId] ~= nil
+end
+
+---@param builderDefId number
+---@param targetUnitDefId number
+---@return boolean
+function BuilderQueueApi.canBuilderBuild(builderDefId, targetUnitDefId)
+	return builderBuildOptions[builderDefId] and builderBuildOptions[builderDefId][targetUnitDefId]
+end
+
+---@param commandId string
+---@return BuildCommandEntry|nil
+function BuilderQueueApi.getBuildCommandAtLocation(commandId)
+	return buildCommands[commandId]
+end
+
+---@param targetCommandId string
+---@return table|nil commandsToQueue
+function BuilderQueueApi.getQueueFromLocation(targetCommandId)
+	local targetCommand = buildCommands[targetCommandId]
+	if not targetCommand then
+		return nil
+	end
+
+	-- Find a builder that has this command in their queue
+	local sourceBuilderUnitId
+	for builderUnitId, _ in pairs(targetCommand.builderIds) do
+		sourceBuilderUnitId = builderUnitId
+		break
+	end
+
+	if not sourceBuilderUnitId then
+		return nil
+	end
+
+	local builderQueue = builderCommandQueues[sourceBuilderUnitId]
+	if not builderQueue then
+		return nil
+	end
+
+	local startIndex = -1
+
+	for i = 1, #builderQueue do
+		if builderQueue[i] == targetCommandId then
+			startIndex = i
+			break
+		end
+	end
+
+	local subQueueData = {}
+	if startIndex > 0 then
+		for i = startIndex, #builderQueue do
+			local commandId = builderQueue[i]
+			local commandData = buildCommands[commandId]
+			if commandData then
+				table.insert(subQueueData, commandData)
+			end
+		end
+	end
+
+	return #subQueueData > 0 and subQueueData or nil
+end
+
+---@param targetCommandId string
+---@return table|nil commandsToQueue
+function BuilderQueueApi.getQueueToLocation(targetCommandId)
+	local targetCommand = buildCommands[targetCommandId]
+	if not targetCommand then
+		return nil
+	end
+
+	-- Find a builder that has this command in their queue
+	local sourceBuilderUnitId
+	for builderUnitId, _ in pairs(targetCommand.builderIds) do
+		sourceBuilderUnitId = builderUnitId
+		break
+	end
+
+	if not sourceBuilderUnitId then
+		return nil
+	end
+
+	local builderQueue = builderCommandQueues[sourceBuilderUnitId]
+	if not builderQueue then
+		return nil
+	end
+
+	local endIndex = -1
+
+	for i = 1, #builderQueue do
+		if builderQueue[i] == targetCommandId then
+			endIndex = i
+			break
+		end
+	end
+
+	local subQueueData = {}
+	if endIndex > 0 then
+		for i = 1, endIndex do
+			local commandId = builderQueue[i]
+			local commandData = buildCommands[commandId]
+			if commandData then
+				table.insert(subQueueData, commandData)
+			end
+		end
+	end
+
+	return #subQueueData > 0 and subQueueData or nil
+end
 
 --------------------------------------------------------------------------------
 -- Widget Callins
@@ -317,10 +457,12 @@ function widget:UnitCreated(unitId, unitDefId)
 	if x then
 		local commandId = generateId(unitDefId, floor(x), floor(z))
 		local commandData = buildCommands[commandId]
-		buildCommands[commandId] = nil
-		commandIdToCreatedUnitIdMap[commandId] = unitId
-		createdUnitIdToCommandIdMap[unitId] = commandId
-		notifyEvent(Event.onUnitCreated, unitId, unitDefId, commandId, commandData)
+		if commandData then
+			buildCommands[commandId] = nil
+			commandIdToCreatedUnitIdMap[commandId] = unitId
+			createdUnitIdToCommandIdMap[unitId] = commandId
+			notifyEvent(Event.onUnitCreated, unitId, unitDefId, commandId, commandData)
+		end
 	end
 end
 

@@ -280,7 +280,9 @@
 				"gauss_tooltip": "Switches between Gauss Cannon and Heavy Plasma Cannon"
 			},
 			"quicksharetotarget": "Share Unit",
-			"quicksharetotarget_tooltip": "Share unit to target player."
+			"quicksharetotarget_tooltip": "Share unit to target player",
+			"join_build_queue": "Join Queue",
+			"join_build_queue_tooltip": "Join existing building queue from selected point"
 		},
 		"idleBuilders": {
 			"name": "Idle Builders",
