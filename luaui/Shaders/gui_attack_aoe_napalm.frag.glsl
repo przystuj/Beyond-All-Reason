@@ -12,7 +12,7 @@ varying vec4 vColor;
 // =======================================================================
 
 // 1. SIZE: Lower = Bigger clouds
-const float NOISE_SCALE = 0.005;
+const float NOISE_SCALE = 0.05;
 
 // 2. SPEED: [UPDATED] Very slow drift now (Fire from above doesn't "run" away)
 const vec2 SCROLL_SPEED = vec2(0.9, -0.9);
