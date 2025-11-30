@@ -12,17 +12,17 @@ varying vec4 vColor;
 // =======================================================================
 
 // 1. SIZE: Lower = Bigger clouds
-const float NOISE_SCALE = 0.09;
+const float NOISE_SCALE = 0.005;
 
 // 2. SPEED: [UPDATED] Very slow drift now (Fire from above doesn't "run" away)
-const vec2 SCROLL_SPEED = vec2(-0.9, 0.9);
+const vec2 SCROLL_SPEED = vec2(0.9, -0.9);
 
 // 3. CONTRAST: 1.0 = Blurry/Flat. 0.0 = Sharp edges.
-const float SHARPNESS = 0;
+const float SHARPNESS = 1;
 
 // 4. VISIBILITY:
-const float OPACITY_MIN = 0.3;
-const float OPACITY_MAX = 0.5;
+const float OPACITY_MIN = 0.5;
+const float OPACITY_MAX = 0.8;
 
 // 5. DETAIL: 0.0 to 1.0
 const float DETAIL_STRENGTH = 0.2;
