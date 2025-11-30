@@ -90,7 +90,7 @@ local GL_NOTEQUAL = GL.NOTEQUAL
 local Config = {
 	General = {
 		gameSpeed = Game.gameSpeed,
-		minSpread = 8, -- weapons with this spread or less are ignored
+		minSpread = 8,
 	},
 	Colors = {
 		aoe = { 1, 0, 0, 1 },
@@ -100,6 +100,7 @@ local Config = {
 		emp = { 0.65, 0.65, 1, 1 },
 		scatter = { 1, 1, 0, 1 },
 		noStockpile = { 0.88, 0.88, 0.88, 1 },
+		arcBlocked = { 1, 0, 0, 1 },
 	},
 	Render = {
 		scatterMinAlpha = 0.5,
@@ -111,12 +112,19 @@ local Config = {
 		pointSizeMult = 2048,
 		maxFilledCircleAlpha = 0.2,
 		minFilledCircleAlpha = 0.1,
-		ringDamageLevels = { 0.8, 0.6, 0.4, 0.2 }, -- draw aoe rings for these damage levels
+		ringDamageLevels = { 0.8, 0.6, 0.4, 0.2 },
+	},
+	BallisticArc = {
+		simStep = 4, -- Higher = less CPU, lower = smoother curve
+		alpha = 0.3, -- Base line opacity
+		maxDepth = 80, -- Depth range for color blending
+		overshoot = 0, -- Draw 20% past the target
+		startFadeGap = 100, -- Distance from muzzle before line becomes visible
 	},
 	Animation = {
 		salvoSpeed = 0.1,
 		waveDuration = 0.35,
-		fadeDuration = 0, -- Calculated below
+		fadeDuration = 0,
 	}
 }
 
@@ -328,11 +336,13 @@ local function FadeColorInPlace(color, alphaMult)
 	color[4] = color[4] * alphaMult
 end
 
-local function LerpColorInPlace(sourceColor, targetColor, t, out)
+local function LerpColor(sourceColor, targetColor, t, out)
+	out = out or { 0, 0, 0, 0 }
 	out[1] = lerp(sourceColor[1], targetColor[1], t)
 	out[2] = lerp(sourceColor[2], targetColor[2], t)
 	out[3] = lerp(sourceColor[3], targetColor[3], t)
 	out[4] = lerp(sourceColor[4], targetColor[4], t)
+	return out
 end
 
 local function CopyColor(target, source)
@@ -511,7 +521,7 @@ local function CreateNoiseTexture()
 	local data = {}
 	for i = 1, size * size do
 		local val = math.random(0, 255) -- Full range 0-255
-		data[i] = {val, val, val, 255}
+		data[i] = { val, val, val, 255 }
 	end
 
 	return gl.CreateTexture(size, size, {
@@ -678,6 +688,8 @@ local function BuildWeaponInfo(unitDef, weaponDef, weaponNum, unitDefID)
 	local weaponType = weaponDef.type
 	local scatter = weaponDef.accuracy + weaponDef.sprayAngle
 
+	info.weaponHeight = nil -- weaponY - unitY when weapon is ready to shoot. Will be cached in real time.
+	info.reloadWeaponHeightFrame = -1 -- weaponHeight will be precise only when weapon wasn't in middle of reload so have to reload it if it was cached at wrong time
 	info.aoe = weaponDef.damageAreaOfEffect
 	info.cost = unitDef.cost
 	info.mobile = unitDef.speed > 0
@@ -717,6 +729,7 @@ local function BuildWeaponInfo(unitDef, weaponDef, weaponNum, unitDefID)
 		info.v = weaponDef.projectilespeed * Config.General.gameSpeed
 		info.projectileCount = weaponDef.projectiles or 1
 		info.salvoSize = weaponDef.salvoSize or 1
+		info.salvoSize = weaponDef.customParams.avoidGround
 	elseif weaponType == "MissileLauncher" then
 		local turnRate = weaponDef.turnRate or 0
 		if weaponDef.wobble > turnRate * 1.5 then
@@ -852,6 +865,9 @@ end
 
 ---@return WeaponInfo, number
 local function GetActiveUnitInfo()
+	local weaponInfo ---@type WeaponInfo
+	local unitId
+
 	if not State.hasSelection then
 		return nil, nil
 	end
@@ -859,12 +875,29 @@ local function GetActiveUnitInfo()
 	local _, cmd, _ = spGetActiveCommand()
 
 	if ((cmd == CMD_MANUALFIRE or cmd == CMD_MANUAL_LAUNCH) and State.manualFireUnitDefID) then
-		return State.manualWeaponInfos[State.manualFireUnitDefID], State.manualFireUnitID
+		weaponInfo, unitId = State.manualWeaponInfos[State.manualFireUnitDefID], State.manualFireUnitID
 	elseif ((cmd == CMD_ATTACK or cmd == CMD_UNIT_SET_TARGET or cmd == CMD_UNIT_SET_TARGET_NO_GROUND) and State.attackUnitDefID) then
-		return State.weaponInfos[State.attackUnitDefID], State.attackUnitID
+		weaponInfo, unitId = State.weaponInfos[State.attackUnitDefID], State.attackUnitID
+	else
+		return nil, nil
 	end
 
-	return nil, nil
+	local frame = Spring.GetGameFrame()
+	if weaponInfo.type == "ballistic" and weaponInfo.reloadWeaponHeightFrame and weaponInfo.reloadWeaponHeightFrame <= frame then
+		local wx, wy, wz = Spring.GetUnitWeaponVectors(unitId, weaponInfo.weaponNum)
+		local ux, uy, uz = spGetUnitPosition(unitId)
+		weaponInfo.weaponHeight = wy - uy
+		local reloadFrame = Spring.GetUnitWeaponState(unitId, weaponInfo.weaponNum, "reloadFrame")
+		-- reload to make sure that the proper, ready-to-fire position is cached. Caching in middle of reload might get wrong position
+		-- for example for Calamity
+		if weaponInfo.reloadWeaponHeightFrame > 0 and weaponInfo.reloadWeaponHeightFrame <= frame then
+			weaponInfo.reloadWeaponHeightFrame = nil
+		else
+			weaponInfo.reloadWeaponHeightFrame = reloadFrame
+		end
+	end
+
+	return weaponInfo, unitId
 end
 
 --------------------------------------------------------------------------------
@@ -1177,6 +1210,148 @@ local function GetBallisticVector(initialSpeed, dx, dy, dz, trajectoryMode)
 	return normalize(launchVecX, launchVecY, launchVecZ)
 end
 
+-- fixme use lerp
+local function MixColorResult(c1, c2, factor)
+	-- Returns r, g, b, a
+	if factor <= 0 then return c1[1], c1[2], c1[3], c1[4] end
+	if factor >= 1 then return c2[1], c2[2], c2[3], c2[4] end
+	return c1[1] + (c2[1] - c1[1]) * factor,
+	c1[2] + (c2[2] - c1[2]) * factor,
+	c1[3] + (c2[3] - c1[3]) * factor,
+	c1[4] + (c2[4] - c1[4]) * factor
+end
+
+--------------------------------------------
+-- TRAJECTORY ARC
+--------------------------------------------------------------------------------
+---@param data IndicatorDrawData
+---@return number maxBlockedFactor The maximum obstruction level encountered (0..1)
+local function DrawBallisticTrajectoryObstacle(data)
+	local weaponInfo = data.weaponInfo
+	-- only for long range weapons
+	if weaponInfo.range < 2000 then
+		return 0
+	end
+
+	-- this should be very rare, for example
+	if data.weaponInfo.weaponHeight == nil then
+		return 0
+	end
+
+	local aimingUnitID = data.unitID
+	local ux, uy, uz = spGetUnitPosition(aimingUnitID)
+	uy = uy + data.weaponInfo.weaponHeight
+	local tx, ty, tz = data.target.x, data.target.y, data.target.z
+
+	-- 1. Setup Physics
+	local trajectoryState = select(7, spGetUnitStates(aimingUnitID, false, true))
+	local trajectory = trajectoryState and 1 or -1
+
+	local dx, dy, dz = tx - ux, ty - uy, tz - uz
+	local bx, by, bz = GetBallisticVector(weaponInfo.v, dx, dy, dz, trajectory)
+	if not bx then return 0 end
+
+	local gameSpeed = Config.General.gameSpeed
+	local v_f = weaponInfo.v / gameSpeed
+	local g_f = gravityPerFrame
+	local simStep = Config.BallisticArc.simStep
+	local g_step = g_f * simStep
+
+	local px, py, pz = ux, uy, uz
+	local vx, vy, vz = bx * v_f, by * v_f, bz * v_f
+	local lx, ly, lz = px, py, pz
+
+	local distTarget = distance3d(ux, uy, uz, tx, ty, tz)
+	local distTargetSq = distTarget * distTarget
+
+	-- 2. Configuration
+	local arcColor = data.colors.scatter
+	local maxDepth = Config.BallisticArc.maxDepth
+
+
+	-- Safety Gradient
+	local safetyFadeStart = distTarget * 0.2
+	local safetyFadeEnd = distTarget * 0.1
+
+	-- 3. The Latch State
+	local maxBlockedFactor = 0
+
+	glDepthTest(false)
+	glLineWidth(2.5)
+
+	glBeginEnd(GL_LINE_STRIP, function()
+		glColor(arcColor[1], arcColor[2], arcColor[3], 0)
+		glVertex(px, py, pz)
+
+		local maxIter = 1000
+
+		local minDepth = 99999
+		local minpy = 99999
+		for _ = 1, maxIter do
+			lx, ly, lz = px, py, pz
+
+			-- Integrate
+			px = px + vx * simStep
+			py = py + vy * simStep
+			pz = pz + vz * simStep
+			vy = vy - g_step
+
+			local currentDistSq = (px - ux) ^ 2 + (py - uy) ^ 2 + (pz - uz) ^ 2
+			local currentDist = sqrt(currentDistSq)
+
+			-- Interpolate End Point (Stability)
+			if currentDistSq >= distTargetSq then
+				local lastDist = sqrt((lx - ux) ^ 2 + (ly - uy) ^ 2 + (lz - uz) ^ 2)
+				local fraction = (distTarget - lastDist) / (currentDist - lastDist)
+				px = lx + (px - lx) * fraction
+				py = ly + (py - ly) * fraction
+				pz = lz + (pz - lz) * fraction
+				currentDist = distTarget
+				-- Break loop after drawing this final point
+			end
+
+			-- 4. Calculate Current "Instant" Obstruction
+			local gwh = spGetGroundHeight(px, pz)
+			local depth = gwh - py -- Positive = Underground
+
+			local currentFactor = 0
+			if depth > 0 then
+				currentFactor = depth / maxDepth -- 0 to 1 gradient
+			end
+
+			-- Apply Safety Mask (Ignore ground near target)
+			local distRemaining = distTarget - currentDist
+			local safetyScale = 1
+			if distRemaining <= safetyFadeEnd then
+				safetyScale = 0
+			elseif distRemaining <= safetyFadeStart then
+				safetyScale = (distRemaining - safetyFadeEnd) / (safetyFadeStart - safetyFadeEnd)
+			end
+
+			currentFactor = currentFactor * safetyScale
+
+			-- 5. Update Latch
+			if currentFactor > maxBlockedFactor then
+				maxBlockedFactor = currentFactor
+			end
+
+			-- 6. Draw with Latched Color
+			-- Use helper function for RGB mixing
+			local color = LerpColor(data.colors.scatter, Config.Colors.arcBlocked, maxBlockedFactor)
+			SetColor(maxBlockedFactor, color)
+			glVertex(px, py, pz)
+
+			if currentDist >= distTarget or py < 0 then break end
+		end
+	end)
+
+	glLineWidth(1)
+	glDepthTest(true)
+	glColor(1, 1, 1, 1)
+
+	return maxBlockedFactor
+end
+
 --- Calculates where a projectile with specific velocity vector will intersect the target plane
 local function GetScatterImpact(ux, uz, calc_tx, calc_tz, v_f, gravity_f, heightDiff, dirX, dirY, dirZ)
 	local velY = dirY * v_f
@@ -1218,9 +1393,10 @@ end
 
 local function DrawAnnularSectorFill(ux, uz, aimAngle, halfAngle, rMin, rMax)
 	local arcLength = rMax * halfAngle * 2
-	local segments = ceil(arcLength / 20)
-	if segments < 8 then segments = 8 end
-	if segments > 64 then segments = 64 end
+	local segments = ceil(arcLength)
+
+	if segments < 32 then segments = 32 end
+	if segments > 256 then segments = 256 end
 
 	local step = (halfAngle * 2) / segments
 
@@ -1746,6 +1922,18 @@ end
 
 ---@param data IndicatorDrawData
 local function DrawBallistic(data)
+	-- Draw trajectory and get the blocked factor (0 = Clear, 1 = Blocked)
+	local blockedFactor = DrawBallisticTrajectoryObstacle(data)
+
+	-- If blocked, tint the scatter area Red
+	if blockedFactor > 0.01 then
+		local targetColor = Config.Colors.arcBlocked
+		LerpColor(data.colors.scatter, targetColor, blockedFactor, data.colors.scatter)
+		if data.colors.fill[4] > 0 then
+			LerpColor(data.colors.fill, targetColor, blockedFactor, data.colors.fill)
+		end
+	end
+
 	local scatterAlphaFactor = DrawBallisticScatter(data)
 	local baseColorOverride = scatterAlphaFactor and GetFadedColor(data.colors.base, 1 - (scatterAlphaFactor * 0.7))
 	DrawAoe(data, baseColorOverride)
@@ -1797,7 +1985,6 @@ function widget:Initialize()
 	smokeShader = CreateSmokeShader()
 	if smokeShader then
 		timeUniformLoc = gl.GetUniformLocation(smokeShader, "time")
-		-- [[ NEW ]] Get the location for the center position
 		centerUniformLoc = gl.GetUniformLocation(smokeShader, "center")
 	end
 	noiseTexture = CreateNoiseTexture()
@@ -1830,7 +2017,7 @@ function widget:DrawWorldPreUnit()
 		return
 	end
 
-	local ux, uy, uz = spGetUnitPosition(aimingUnitID)
+	local ux, uy, uz, ax, ay, az = spGetUnitPosition(aimingUnitID, false, true)
 	if (not ux) then
 		ResetPulseAnimation()
 		return
@@ -1860,9 +2047,9 @@ function widget:DrawWorldPreUnit()
 
 	if weaponInfo.hasStockpile then
 		local progress = StockpileSystem.fadeProgress
-		LerpColorInPlace(noStockpileColor, baseColor, progress, aimData.colors.base)
-		LerpColorInPlace(noStockpileColor, scatterColor, progress, aimData.colors.scatter)
-		LerpColorInPlace(noStockpileColor, baseFillColor, progress, aimData.colors.fill)
+		LerpColor(noStockpileColor, baseColor, progress, aimData.colors.base)
+		LerpColor(noStockpileColor, scatterColor, progress, aimData.colors.scatter)
+		LerpColor(noStockpileColor, baseFillColor, progress, aimData.colors.fill)
 	else
 		-- Copy to avoid creating new tables
 		CopyColor(aimData.colors.base, baseColor)
