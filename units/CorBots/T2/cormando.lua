@@ -129,9 +129,6 @@ return {
 				damage = {
 					default = 100,
 				},
-				customparams = {
-					exclude_preaim = true,
-				},
 			},
 		},
 		weapons = {
