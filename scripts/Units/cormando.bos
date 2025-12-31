@@ -9,6 +9,7 @@ piece  turret, sleeve, barrel, torso, rnano,
 
 #define SIGNAL_AIM1 2
 #define SIGNAL_BUILD 4
+#define SIGNAL_AIM2 8
 
 lua_UnitScriptDecal(lightIndex, xpos,zpos, heading)
 {
@@ -464,6 +465,41 @@ AimWeapon1(heading, pitch)
 }
 
 FireWeapon1()
+{
+	emit-sfx 1024 + 0 from flare;
+    move barrel to y-axis [-0.5] speed [3.750000];
+	sleep 50;
+	move barrel to y-axis [0] now;
+}
+
+AimWeapon2(heading, pitch)
+{
+    // 1. Deployment Logic
+    if( deploy_state == NOT_DEPLOYED )
+    {
+        call-script Deploy(heading, pitch);
+        return (0);
+    }
+    else if ( deploy_state == DEPLOYING )
+    {
+        return (0);
+    }
+
+    signal SIGNAL_AIM2;
+    set-signal-mask SIGNAL_AIM2;
+
+    // 2. Aiming Logic
+    turn turret to y-axis heading - torsoRotation speed <400.0>;
+    turn sleeve to x-axis <270.0> - pitch speed <450.0>;
+
+    // 3. Fire Permission
+    start-script RestoreAfterDelay();
+
+    // Return 1 so it shoots immediately when the engine decides the angle is good.
+    return (1);
+}
+
+FireWeapon2()
 {
 	emit-sfx 1024 + 0 from flare;
     move barrel to y-axis [-0.5] speed [3.750000];
