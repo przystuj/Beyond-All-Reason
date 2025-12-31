@@ -36,6 +36,7 @@ return {
 		script = "Units/CORMANDO.cob",
 		seismicsignature = 4,
 		selfdestructas = "mediumExplosionGenericSelfd",
+		selfdestructcountdown = 2,
 		sightdistance = 600,
 		speed = 75,
 		turninplace = true,
@@ -64,7 +65,7 @@ return {
 			techlevel = 2,
 			unitgroup = "buildert2",
 			water_fall_damage_multiplier = 0,
-			paralyzemultiplier = 0.5,
+			paralyzemultiplier = 0.2,
 		},
 		sfxtypes = {
 			explosiongenerators = {
@@ -130,7 +131,8 @@ return {
 				weapontype = "BeamLaser",
 				weaponvelocity = 1000,
 				damage = {
-					default = 100
+					default = 100,
+					vtol = 50
 				},
 			},
 		},
